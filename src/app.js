@@ -4,6 +4,8 @@ import { fetchHeadless } from './commands/fetch.js';
 import { generateDashboardHtml } from './dashboard/dashboardHtml.js';
 import { LENS_NAMES, LENS_EMOJI } from './config/constants.js';
 import { isAIAvailable } from './intelligence/claudeClient.js';
+import { detectSignals, analyzePreferredVoices, generateContentHooks, extractMarketMoves, analyzeLensHealth, detectCrossLensThemes, detectTrendVelocity, generateActions } from './intelligence/signalDetector.js';
+import { generateExecSummary } from './intelligence/execSummary.js';
 
 export function createApp() {
   const app = express();
@@ -97,6 +99,55 @@ export function createApp() {
   };
   app.post('/api/refresh', handleRefresh);
   app.get('/api/refresh', handleRefresh);  // GET for Vercel cron
+
+  // ─── API: SIGNALS ──────────────────────────────────────────────
+  app.get('/api/signals', async (req, res) => {
+    try {
+      const articles = await getRecentArticles({ hours: 72 });
+      const signals = detectSignals(articles);
+      const voiceAnalysis = analyzePreferredVoices(articles);
+      const contentHooks = generateContentHooks(signals, voiceAnalysis, articles);
+      const marketMoves = extractMarketMoves(articles);
+      const lensHealth = analyzeLensHealth(articles, signals);
+      const crossLensThemes = detectCrossLensThemes(signals);
+      const trendVelocity = await detectTrendVelocity(signals);
+      const actions = generateActions(signals, marketMoves, voiceAnalysis, {
+        lensHealth, crossLensThemes, trendVelocity,
+      });
+
+      res.json({
+        signals, voiceAnalysis, contentHooks, marketMoves,
+        lensHealth, crossLensThemes, trendVelocity, actions,
+      });
+    } catch (err) {
+      console.error('Signals error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ─── API: EXEC SUMMARY ───────────────────────────────────────────
+  app.get('/api/exec-summary', async (req, res) => {
+    try {
+      const articles = await getRecentArticles({ hours: 72 });
+      const signals = detectSignals(articles);
+      const voiceAnalysis = analyzePreferredVoices(articles);
+      const contentHooks = generateContentHooks(signals, voiceAnalysis, articles);
+      const marketMoves = extractMarketMoves(articles);
+      const lensHealth = analyzeLensHealth(articles, signals);
+      const crossLensThemes = detectCrossLensThemes(signals);
+      const trendVelocity = await detectTrendVelocity(signals);
+
+      const result = await generateExecSummary(
+        signals, voiceAnalysis, marketMoves, contentHooks,
+        lensHealth, crossLensThemes, trendVelocity, articles
+      );
+
+      res.json(result);
+    } catch (err) {
+      console.error('Exec summary error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
 
   // ─── API: FEEDBACK ────────────────────────────────────────────
   app.post('/api/feedback', async (req, res) => {

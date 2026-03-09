@@ -2,6 +2,8 @@ import dayjs from 'dayjs';
 import { getRecentArticles, getRecentPastes } from '../storage/db.js';
 import { LENS_NAMES, LENS_EMOJI } from '../config/constants.js';
 import { PREFERRED_VOICES } from '../config/preferredVoices.js';
+import { detectSignals, analyzePreferredVoices as analyzeVoices, generateContentHooks, extractMarketMoves, analyzeLensHealth, detectCrossLensThemes, detectTrendVelocity, generateActions } from '../intelligence/signalDetector.js';
+import { generateExecSummary } from '../intelligence/execSummary.js';
 
 function esc(text) {
   if (!text) return '';
@@ -15,9 +17,39 @@ function truncate(text, maxLen) {
   return clean.slice(0, maxLen).trim() + '...';
 }
 
+function nl2br(text) {
+  if (!text) return '';
+  return esc(text).replace(/\n/g, '<br>');
+}
+
 export async function generateDashboardHtml() {
   const articles = await getRecentArticles({ hours: 72 });
 
+  // ─── Intelligence Layer ───────────────────────────────────────
+  const signals = detectSignals(articles);
+  const signalVoiceAnalysis = analyzeVoices(articles);
+  const contentHooks = generateContentHooks(signals, signalVoiceAnalysis, articles);
+  const marketMoves = extractMarketMoves(articles);
+  const lensHealth = analyzeLensHealth(articles, signals);
+  const crossLensThemes = detectCrossLensThemes(signals);
+  let trendVelocity = [];
+  try { trendVelocity = await detectTrendVelocity(signals); } catch { /* first run */ }
+  const actions = generateActions(signals, marketMoves, signalVoiceAnalysis, {
+    lensHealth, crossLensThemes, trendVelocity,
+  });
+
+  // Exec summary (AI or template)
+  let execSummary = null;
+  try {
+    execSummary = await generateExecSummary(
+      signals, signalVoiceAnalysis, marketMoves, contentHooks,
+      lensHealth, crossLensThemes, trendVelocity, articles
+    );
+  } catch (err) {
+    console.error('Exec summary failed:', err.message);
+  }
+
+  // ─── Dashboard Data ───────────────────────────────────────────
   // Group preferred voice articles
   const voiceMap = {};
   for (const voice of PREFERRED_VOICES) {
@@ -60,6 +92,96 @@ export async function generateDashboardHtml() {
 
   const displayDate = dayjs().format('dddd, MMMM D, YYYY');
 
+  // ─── Build exec summary HTML ──────────────────────────────────
+  let execHtml = '';
+  if (execSummary && execSummary.sections) {
+    const s = execSummary.sections;
+    const sourceLabel = execSummary.source === 'ai' ? 'AI-synthesized' : 'Template';
+    execHtml = `
+<!-- EXEC SUMMARY -->
+<div class="exec-summary" id="sec-exec">
+  <div class="exec-header">
+    <div class="exec-title">\u{1F3AF} YOUR DAILY BRIEFING</div>
+    <span class="exec-source">${sourceLabel}</span>
+  </div>
+
+  <div class="exec-section">
+    <div class="exec-section-label">\u{1F3AF} YOUR MOVE</div>
+    <div class="exec-section-content">${nl2br(s.move || 'No action generated yet. Run a feed refresh to populate.')}</div>
+  </div>
+
+  <div class="exec-section">
+    <div class="exec-section-label">\u{1F50D} WHAT SHIFTED</div>
+    <div class="exec-section-content">${nl2br(s.shifted || 'No lens intelligence yet.')}</div>
+  </div>
+
+  <div class="exec-section exec-section-last">
+    <div class="exec-section-label">\u26A1 GAPS & OPPORTUNITIES</div>
+    <div class="exec-section-content">${nl2br(s.gaps || 'No gaps detected.')}</div>
+  </div>
+</div>`;
+  }
+
+  // ─── Build actions HTML ───────────────────────────────────────
+  const topActions = actions.slice(0, 5);
+  let actionsHtml = '';
+  if (topActions.length > 0) {
+    actionsHtml = `
+<!-- DO THIS TODAY -->
+<div class="section" id="sec-actions">
+  <div class="section-header" onclick="toggleSection('sec-actions')">
+    <h2>\u2705 DO THIS TODAY <span class="badge">${topActions.length}</span></h2><span class="chevron">\u25BC</span>
+  </div>
+  <div class="section-body">
+    ${topActions.map(a => `
+    <div class="action-card">
+      <span class="action-emoji">${a.emoji || '\u{1F4CC}'}</span>
+      <div class="action-body">
+        <div class="action-text">${esc(a.text)}</div>
+        <div class="action-detail">${esc(a.detail || '')}</div>
+        ${a.link ? `<a href="${esc(a.link)}" target="_blank" class="action-link">Read \u2192</a>` : ''}
+      </div>
+    </div>`).join('')}
+  </div>
+</div>`;
+  }
+
+  // ─── Build signals HTML ───────────────────────────────────────
+  const topSignals = signals.slice(0, 6);
+  let signalsHtml = '';
+  if (topSignals.length > 0) {
+    signalsHtml = `
+<!-- SIGNALS -->
+<div class="section" id="sec-signals">
+  <div class="section-header" onclick="toggleSection('sec-signals')">
+    <h2>\u{1F4E1} SIGNALS DETECTED <span class="badge">${signals.length}</span></h2><span class="chevron">\u25BC</span>
+  </div>
+  <div class="section-body">
+    ${topSignals.map(sig => {
+      const strengthPct = Math.min(Math.round((sig.strength / 15) * 100), 100);
+      const velocity = trendVelocity.find(t => t.signalId === sig.id);
+      const velLabel = velocity ? velocity.velocity : '';
+      const velColor = { accelerating: 'var(--green)', emerging: 'var(--accent)', steady: 'var(--text-muted)', decelerating: 'var(--red)' };
+      const lensNames = (sig.lenses || []).map(l => LENS_NAMES[l] || l).join(', ');
+      return `
+    <div class="signal-card">
+      <div class="signal-header">
+        <span class="signal-label">${esc(sig.label)}</span>
+        ${velLabel ? `<span class="velocity-badge" style="color:${velColor[velLabel] || 'var(--text-muted)'}">${velLabel}${velocity?.change ? ` ${velocity.change}` : ''}</span>` : ''}
+      </div>
+      <div class="signal-meta">
+        <span>${sig.strength} articles</span> \u00B7 <span>${sig.sourceCount} sources</span>
+        ${sig.preferredHits > 0 ? `\u00B7 <span style="color:var(--red)">${sig.preferredHits} preferred</span>` : ''}
+        \u00B7 <span class="signal-lenses">${esc(lensNames)}</span>
+      </div>
+      <div class="signal-bar"><div class="signal-bar-fill" style="width:${strengthPct}%"></div></div>
+      <div class="signal-insight">${esc(sig.insight)}</div>
+    </div>`;
+    }).join('')}
+  </div>
+</div>`;
+  }
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -90,6 +212,35 @@ a:hover { text-decoration: underline; }
 .refresh-btn:hover { color: var(--accent); border-color: var(--accent); }
 .refresh-btn.loading { opacity: 0.6; cursor: wait; }
 
+/* Exec Summary */
+.exec-summary { background: linear-gradient(135deg, #1e293b 0%, #1a1a3e 100%); border: 1px solid var(--accent2); border-radius: 14px; margin-bottom: 16px; overflow: hidden; }
+.exec-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px 0; }
+.exec-title { font-size: 15px; font-weight: 700; color: var(--accent); letter-spacing: 0.5px; }
+.exec-source { font-size: 10px; color: var(--text-muted); background: var(--surface2); padding: 2px 8px; border-radius: 8px; }
+.exec-section { padding: 12px 20px; border-bottom: 1px solid rgba(71, 85, 105, 0.4); }
+.exec-section-last { border-bottom: none; padding-bottom: 16px; }
+.exec-section-label { font-size: 12px; font-weight: 700; color: var(--accent); margin-bottom: 6px; letter-spacing: 0.3px; }
+.exec-section-content { font-size: 13px; line-height: 1.7; color: var(--text); }
+
+/* Action cards */
+.action-card { background: var(--bg); border-radius: 8px; padding: 12px 14px; margin-bottom: 8px; display: flex; align-items: flex-start; gap: 10px; border-left: 3px solid var(--green); }
+.action-emoji { font-size: 18px; flex-shrink: 0; margin-top: 2px; }
+.action-body { flex: 1; min-width: 0; }
+.action-text { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+.action-detail { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+.action-link { font-size: 11px; color: var(--accent); margin-top: 4px; display: inline-block; }
+
+/* Signal cards */
+.signal-card { background: var(--bg); border-radius: 8px; padding: 12px 14px; margin-bottom: 8px; }
+.signal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.signal-label { font-size: 14px; font-weight: 600; }
+.velocity-badge { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
+.signal-meta { font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }
+.signal-lenses { color: var(--accent2); }
+.signal-bar { height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; margin-bottom: 6px; }
+.signal-bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent2), var(--accent)); border-radius: 3px; }
+.signal-insight { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+
 /* Filter bar */
 .filter-bar { position: sticky; top: 0; z-index: 50; background: var(--bg); border-bottom: 1px solid var(--border); padding: 10px 0; }
 .filter-bar .container { display: flex; gap: 8px; overflow-x: auto; align-items: center; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; }
@@ -100,7 +251,7 @@ a:hover { text-decoration: underline; }
 
 /* Stats */
 .stats-row { display: flex; gap: 10px; margin: 16px 0; flex-wrap: wrap; }
-.stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; flex: 1 1 calc(25% - 10px); min-width: 100px; text-align: center; }
+.stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; flex: 1 1 calc(20% - 10px); min-width: 80px; text-align: center; }
 .stat-card .number { font-size: 28px; font-weight: 700; color: var(--accent); }
 .stat-card .label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
 
@@ -163,6 +314,7 @@ a:hover { text-decoration: underline; }
   .hero h1 { font-size: 20px; }
   .lens-label { width: 130px; font-size: 12px; }
   .section-header h2 { font-size: 14px; }
+  .exec-section-content { font-size: 12px; }
 }
 
 .footer { text-align: center; padding: 20px 0; color: var(--text-muted); font-size: 11px; }
@@ -177,7 +329,7 @@ a:hover { text-decoration: underline; }
     <div class="date">${esc(displayDate)} \u00B7 <span class="local-time"></span>
       <button class="refresh-btn" id="refresh-btn" onclick="refreshFeeds()" title="Refresh feeds">\u{1F504} Refresh</button>
     </div>
-    <div class="subtitle">Workforce intelligence for the Chief People Officer \u2014 ${articles.length} articles across ${Object.keys(LENS_NAMES).length} strategic lenses</div>
+    <div class="subtitle">Workforce intelligence for the Chief People Officer \u2014 ${articles.length} articles across ${Object.keys(LENS_NAMES).length} strategic lenses \u00B7 ${signals.length} signals detected</div>
   </div>
 </div>
 
@@ -200,8 +352,15 @@ a:hover { text-decoration: underline; }
   <div class="stat-card"><div class="number">${articles.length}</div><div class="label">Articles</div></div>
   <div class="stat-card"><div class="number" style="color:var(--green)">${trulyTodayCount}</div><div class="label">New Today</div></div>
   <div class="stat-card"><div class="number" style="color:var(--red)">${preferredCount}</div><div class="label">Preferred</div></div>
-  <div class="stat-card"><div class="number" style="color:var(--accent2)">${Object.keys(LENS_NAMES).length}</div><div class="label">Lenses</div></div>
+  <div class="stat-card"><div class="number" style="color:var(--accent2)">${signals.length}</div><div class="label">Signals</div></div>
+  <div class="stat-card"><div class="number" style="color:var(--orange)">${actions.length}</div><div class="label">Actions</div></div>
 </div>
+
+${execHtml}
+
+${actionsHtml}
+
+${signalsHtml}
 
 <!-- PREFERRED VOICES -->
 <div class="section" id="sec-voices">
