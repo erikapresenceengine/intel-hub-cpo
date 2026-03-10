@@ -1,6 +1,9 @@
 {
+  "redirects": [
+    { "source": "/", "destination": "/api/dashboard", "permanent": false }
+  ],
   "rewrites": [
-    { "source": "/(.*)", "destination": "/api" }
+    { "source": "/api/:path*", "destination": "/api" }
   ],
   "functions": {
     "api/index.js": {

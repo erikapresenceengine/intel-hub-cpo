@@ -22,14 +22,16 @@ export function createApp() {
   });
 
   // ─── SERVE DASHBOARD ────────────────────────────────────────────
-  app.get('/', async (req, res) => {
+  app.get('/api/dashboard', async (req, res) => {
     try {
       await ensureMigrated();
       const html = await generateDashboardHtml();
-      res.type('html').send(html);
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.status(200).end(html);
     } catch (err) {
       console.error('Dashboard error:', err);
-      res.status(500).send(`<h1>Dashboard Error</h1><pre>${err.message}</pre>`);
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.status(500).end(`<h1>Dashboard Error</h1><pre>${err.message}\n${err.stack}</pre>`);
     }
   });
 

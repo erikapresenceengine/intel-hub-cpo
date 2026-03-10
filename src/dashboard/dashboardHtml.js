@@ -3,7 +3,6 @@ import { getRecentArticles, getRecentPastes } from '../storage/db.js';
 import { LENS_NAMES, LENS_EMOJI } from '../config/constants.js';
 import { PREFERRED_VOICES } from '../config/preferredVoices.js';
 import { detectSignals, analyzePreferredVoices as analyzeVoices, generateContentHooks, extractMarketMoves, analyzeLensHealth, detectCrossLensThemes, detectTrendVelocity, generateActions } from '../intelligence/signalDetector.js';
-import { generateExecSummary } from '../intelligence/execSummary.js';
 
 function esc(text) {
   if (!text) return '';
@@ -38,16 +37,8 @@ export async function generateDashboardHtml() {
     lensHealth, crossLensThemes, trendVelocity,
   });
 
-  // Exec summary (AI or template)
-  let execSummary = null;
-  try {
-    execSummary = await generateExecSummary(
-      signals, signalVoiceAnalysis, marketMoves, contentHooks,
-      lensHealth, crossLensThemes, trendVelocity, articles
-    );
-  } catch (err) {
-    console.error('Exec summary failed:', err.message);
-  }
+  // Exec summary loaded async via client-side fetch (avoids serverless timeout)
+  const execSummary = null;
 
   // ─── Dashboard Data ───────────────────────────────────────────
   // Group preferred voice articles
@@ -92,35 +83,20 @@ export async function generateDashboardHtml() {
 
   const displayDate = dayjs().format('dddd, MMMM D, YYYY');
 
-  // ─── Build exec summary HTML ──────────────────────────────────
-  let execHtml = '';
-  if (execSummary && execSummary.sections) {
-    const s = execSummary.sections;
-    const sourceLabel = execSummary.source === 'ai' ? 'AI-synthesized' : 'Template';
-    execHtml = `
-<!-- EXEC SUMMARY -->
+  // ─── Build exec summary HTML (loads async via fetch) ─────────
+  const execHtml = `
+<!-- EXEC SUMMARY (loaded async) -->
 <div class="exec-summary" id="sec-exec">
   <div class="exec-header">
     <div class="exec-title">\u{1F3AF} YOUR DAILY BRIEFING</div>
-    <span class="exec-source">${sourceLabel}</span>
+    <span class="exec-source" id="exec-source">Loading...</span>
   </div>
-
-  <div class="exec-section">
-    <div class="exec-section-label">\u{1F3AF} YOUR MOVE</div>
-    <div class="exec-section-content">${nl2br(s.move || 'No action generated yet. Run a feed refresh to populate.')}</div>
-  </div>
-
-  <div class="exec-section">
-    <div class="exec-section-label">\u{1F50D} WHAT SHIFTED</div>
-    <div class="exec-section-content">${nl2br(s.shifted || 'No lens intelligence yet.')}</div>
-  </div>
-
-  <div class="exec-section exec-section-last">
-    <div class="exec-section-label">\u26A1 GAPS & OPPORTUNITIES</div>
-    <div class="exec-section-content">${nl2br(s.gaps || 'No gaps detected.')}</div>
+  <div id="exec-content">
+    <div class="exec-section exec-section-last" style="text-align:center;padding:24px;">
+      <span class="spinner"></span> Generating strategic briefing...
+    </div>
   </div>
 </div>`;
-  }
 
   // ─── Build actions HTML ───────────────────────────────────────
   const topActions = actions.slice(0, 5);
@@ -548,6 +524,35 @@ async function toggleBookmark(articleId, btn) {
     if (data.status === 'flagged') { btn.classList.add('bookmarked'); }
     else { btn.classList.remove('bookmarked'); }
   } catch(e) { console.error('Bookmark error:', e); }
+}
+
+// Async exec summary loader
+(async function loadExecSummary() {
+  try {
+    var resp = await fetch('/api/exec-summary');
+    var data = await resp.json();
+    if (data && data.sections) {
+      var s = data.sections;
+      var sourceLabel = data.source === 'ai' ? 'AI-synthesized' : 'Template';
+      document.getElementById('exec-source').textContent = sourceLabel;
+      document.getElementById('exec-content').innerHTML =
+        '<div class="exec-section"><div class="exec-section-label">\\uD83C\\uDFAF YOUR MOVE</div><div class="exec-section-content">' + nl2brClient(s.move || 'No action generated yet.') + '</div></div>' +
+        '<div class="exec-section"><div class="exec-section-label">\\uD83D\\uDD0D WHAT SHIFTED</div><div class="exec-section-content">' + nl2brClient(s.shifted || 'No lens intelligence yet.') + '</div></div>' +
+        '<div class="exec-section exec-section-last"><div class="exec-section-label">\\u26A1 GAPS & OPPORTUNITIES</div><div class="exec-section-content">' + nl2brClient(s.gaps || 'No gaps detected.') + '</div></div>';
+    } else {
+      document.getElementById('exec-source').textContent = 'Unavailable';
+      document.getElementById('exec-content').innerHTML = '<div class="exec-section exec-section-last"><div class="exec-section-content" style="color:var(--text-muted);">Refresh feeds to generate your briefing.</div></div>';
+    }
+  } catch(e) {
+    document.getElementById('exec-source').textContent = 'Error';
+    document.getElementById('exec-content').innerHTML = '<div class="exec-section exec-section-last"><div class="exec-section-content" style="color:var(--text-muted);">Could not load briefing. Try refreshing.</div></div>';
+  }
+})();
+function nl2brClient(text) {
+  if (!text) return '';
+  var div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML.replace(/\\n/g, '<br>');
 }
 </script>
 
